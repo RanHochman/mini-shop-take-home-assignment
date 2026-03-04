@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../db');
+const redisClient = require('../redis'); // Import the Redis client
 
 /**
  * GET /api/orders - List all orders with their items
@@ -160,9 +161,21 @@ router.post('/', async (req, res) => {
         'INSERT INTO order_items (order_id, item_id, quantity, price) VALUES ($1, $2, $3, $4)',
         [orderId, orderItem.itemId, orderItem.quantity, orderItem.price]
       );
+      
+      // ADD THIS NEW QUERY RIGHT HERE:
+      await client.query(
+        'UPDATE items SET stock = stock - $1 WHERE id = $2',
+        [orderItem.quantity, orderItem.itemId]
+      );
     }
 
     await client.query('COMMIT');
+
+
+    // INVALIDATE CACHE: After successful commit, wipe the items cache!
+    if (redisClient.isReady) {
+      await redisClient.del('items:all');
+    }
 
     res.status(201).json({
       id: orderId,

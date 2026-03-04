@@ -18,7 +18,7 @@ app.use((req, res, next) => {
 });
 
 // Health check endpoint
-app.get('/health', async (req, res) => {
+app.get('/api/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
     res.json({ status: 'healthy', timestamp: new Date().toISOString() });
@@ -49,7 +49,7 @@ async function start() {
     await connectWithRetry();
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`API server running on port ${PORT}`);
-      console.log(`Health check available at http://localhost:${PORT}/health`);
+      console.log(`Health check available at http://localhost:${PORT}/api/health`);
     });
   } catch (error) {
     console.error('Failed to start server:', error);

@@ -1,17 +1,22 @@
 const express = require('express');
 const { pool } = require('../db');
+const redisClient = require('../redis'); // Import the Redis client
+const cacheMiddleware = require('../middleware/cache'); // <-- Import middleware
 
 const router = express.Router();
 
-// GET /items - List all items
-router.get('/', async (req, res) => {
+router.get('/', cacheMiddleware('items:all', 60), async (req, res) => {
   try {
+    // Look how clean this is now! No Redis logic here at all!
+    console.log('Serving items from Postgres DB');
     const result = await pool.query('SELECT * FROM items ORDER BY id');
-    // Convert price from string to number
+    
     const items = result.rows.map(item => ({
       ...item,
       price: parseFloat(item.price)
     }));
+
+    // The middleware automatically intercepts this and saves it to Redis!
     res.json(items);
   } catch (error) {
     console.error('Error fetching items:', error);
@@ -52,6 +57,11 @@ router.post('/', async (req, res) => {
       'INSERT INTO items (name, description, price, stock) VALUES ($1, $2, $3, $4) RETURNING *',
       [name, description || '', price, stock || 0]
     );
+
+    // INVALIDATE CACHE: Stock/items changed, clear the cache
+    if (redisClient.isReady) {
+      await redisClient.del('items:all');
+    }
     
     res.status(201).json(result.rows[0]);
   } catch (error) {
@@ -79,6 +89,11 @@ router.put('/:id', async (req, res) => {
     
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Item not found' });
+    }
+
+    // INVALIDATE CACHE: Stock/items changed, clear the cache
+    if (redisClient.isReady) {
+      await redisClient.del('items:all');
     }
     
     res.json(result.rows[0]);
