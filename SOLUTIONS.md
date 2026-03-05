@@ -100,18 +100,12 @@ This document lists the issues found from a clean clone + `docker compose up --b
 **Root Cause**
 - The architecture lacked a way for Docker to verify if the Nginx containers were actually ready to serve traffic before routing requests to them.
 
-**Fix**
+**Fixed**
 - Added healthcheck blocks to both services in `docker-compose.yml`.
-- Used `curl` to verify the endpoints. Because the base image is `nginx:alpine` (which lacks `curl`), I added `RUN apk add --no-cache curl` to both `frontend/Dockerfile` and `proxy/Dockerfile`.
-- **Frontend Healthcheck:** `curl -f http://localhost/health`
-- **Proxy Healthcheck:** `curl -f http://localhost/`
-
-**Why I didn't use the API's `node -e` healthcheck method:**
-The API service uses a Node.js inline script (`node -e "require('http').get..."`) for its healthcheck. This works perfectly for the API because the API container has the full Node.js runtime installed. However, the `frontend` and `proxy` containers use lightweight `nginx:alpine` images, which do not have Node.js installed at runtime. Using `curl` is the native, lightweight standard for verifying HTTP status in Alpine web server containers.
 
 **How I Verified**
 - Ran `docker compose up --build -d`.
-- Waited 15 seconds, ran `docker compose ps`, and confirmed all four services (`api`, `db`, `frontend`, `proxy`) successfully reported a `(healthy)` status.
+- Waited 15 seconds, ran `docker compose ps`, and confirmed all five services (`api`, `db`, `frontend`, `proxy`, `cache`) successfully reported a `(healthy)` status.
   
 ---
 
@@ -172,8 +166,8 @@ The API service uses a Node.js inline script (`node -e "require('http').get..."`
 - **2. Avoid logging secrets:** don’t print full `DATABASE_URL` / connection strings in logs.
 
 ### C) Architecture Recommendations
-* **1. API Horizontal Scaling:** Because we successfully implemented Redis, the Express API is now completely stateless. We can easily scale the API by running multiple replicas in Docker Compose (`deploy: replicas: 3`). The Nginx upstream block will automatically act as a Round-Robin load balancer, distributing `/api/*` traffic across all available nodes to handle higher throughput.
-* **2. CDN Offloading:** For a real-world e-commerce site, serving the React Single Page Application from a Docker container is inefficient. The built frontend assets should be pushed to a global CDN (like AWS CloudFront or Vercel). The Nginx proxy would then be simplified to act solely as an API Gateway (handling rate-limiting and routing for the Express backend), drastically reducing server load.
+- **1. API Horizontal Scaling:** Because we successfully implemented Redis, the Express API is now completely stateless. We can easily scale the API by running multiple replicas in Docker Compose (`deploy: replicas: 3`). The Nginx upstream block will automatically act as a Round-Robin load balancer, distributing `/api/*` traffic across all available nodes to handle higher throughput.
+- **2. CDN Offloading:** For a real-world e-commerce site, serving the React Single Page Application from a Docker container is inefficient. The built frontend assets should be pushed to a global CDN (like AWS CloudFront or Vercel). The Nginx proxy would then be simplified to act solely as an API Gateway (handling rate-limiting and routing for the Express backend), drastically reducing server load.
 
 
 **Prevent overselling:** update stock with a guard to prevent negative stock.
