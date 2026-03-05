@@ -1,147 +1,142 @@
-# SOLUTIONS.md — Mini‑Shop Take‑Home
+# SOLUTIONS.md — Mini‑Shop
 
-This document lists the real issues found from a clean clone + fresh `docker compose up --build`, how they were diagnosed, and the exact fixes applied.
+This document lists the issues found from a clean clone + `docker compose up --build`, how they were diagnosed, and the exact fixes applied.
 
 ---
 
-## Part 1 — Fresh deploy bugs (fixed)
+## Part 1 — Deploy Bugs (fixed)
 
 ### 1) Frontend image build fails (Vite entry file)
-**What I saw**
+**What I Saw**
 - `docker compose up --build` failed while building the `frontend` image.
 - Error: Rollup/Vite could not resolve `/src/main.js` referenced from `index.html`.
 
-**Root cause**
+**Root Cause**
 - `frontend/index.html` referenced `src/main.js` but the repository uses `src/main.jsx`.
 
-**Fix**
-- Update the script tag to:
+**Fixed**
+- Updated the script tag to:
   - `<script type="module" src="/src/main.jsx"></script>`
 
-**How I verified**
+**How I Verified**
 - Rebuilt and frontend image built successfully (`npm run build` succeeded inside the container build).
 
 ---
 
 ### 2) Proxy container crashes on startup (bad upstream + wrong network attachment)
-**What I saw**
+**What I Saw**
 - `proxy` crashed immediately with:
   - `host not found in upstream "backend:8080" ...`
 
-**Root causes**
+**Root Causes**
 1. Nginx upstream was configured to `backend:8080` (wrong service name/port).
-2. `proxy` was not connected to the backend network, so even correct service DNS would not resolve/reach the API.
+2. `proxy` was not connected to the backend network.
 
-**Fix**
+**Fixed**
 - In `proxy/nginx.conf`:
-  - Change upstream to `server api:3000;`
+  - Changed upstream to `server api:3000;`
 - In `docker-compose.yml`:
-  - Attach `proxy` to **both** networks: `frontend-network` and `backend-network`.
+  - Attached `proxy` to **both** networks: `frontend-network` and `backend-network`.
 
-**How I verified**
+**How I Verified**
 - `proxy` stayed running and successfully routed `/api/*` requests to the API service.
 
 ---
 
 ### 3) API cannot connect to Postgres (wrong hostname in DATABASE_URL)
-**What I saw**
+**What I Saw**
 - API logs repeated retries:
   - `Database connection attempt X/5 failed: Connection terminated due to connection timeout`
 
-**Root cause**
+**Root Cause**
 - `DATABASE_URL` pointed to host `postgres`, but the Compose service name is `db`, so the hostname was wrong inside the Docker network.
 
-**Fix**
-- Update `DATABASE_URL` to use:
+**Fixed**
+- Updated `DATABASE_URL` to use:
   - `...@db:5432/...`
 
-**How I verified**
+**How I Verified**
 - API started successfully and served `/api/items` and `/api/orders` through the proxy.
 
 ---
 
 ### 4) Compose warnings on every command (dollar sign + obsolete version)
-**What I saw**
+**What I Saw**
 - Warning: `"hop_s3cret" variable is not set. Defaulting to a blank string.`
 - Warning: `attribute 'version' is obsolete`
 
-**Root causes**
+**Root Causes**
 - `$` inside YAML strings triggers Compose interpolation (it tried to expand `$hop_s3cret`).
 - Compose v2 ignores the `version:` key and warns.
 
-**Fix**
+**Fixed**
 - Escape literal `$` as `$$` in passwords/URLs (example: `mini$hop_s3cret` → `mini$$hop_s3cret`).
-- Remove `version: '3.8'` from `docker-compose.yml`.
+- Removed `version: '3.8'` from `docker-compose.yml`.
 
-**How I verified**
+**How I Verified**
 - Warnings disappeared from `docker compose ps`, `docker compose up`, etc.
 
 ---
 
 ### 5) Health endpoint path mismatch behind proxy
-**What I saw**
+**What I Saw**
 - `curl http://localhost:8080/api/health` returned: `{"error":"Not found"}`
 
-**Root cause**
+**Root Cause**
 - Express exposed health at `/health`, but requests coming through the proxy were under `/api/*`.
 
-**Fix**
-- Move/duplicate health route to `/api/health` in `api/src/index.js`.
+**Fixed**
+- Moved/duplicated health route to `/api/health` in `api/src/index.js`.
 
-**How I verified**
+**How I Verified**
 - `curl http://localhost:8080/api/health` returned a healthy JSON payload.
 
 ---
 
-### 6) Frontend/proxy shown as “unhealthy” (healthcheck tooling missing)
-**What I saw**
-- `docker compose ps` showed `frontend` and `proxy` as unhealthy.
+### 6) Frontend and Proxy Missing Healthchecks
+**What I Saw**
+- The `api` and `db` services had defined healthchecks, but the `frontend` and `proxy` services had no healthchecks defined in the `docker-compose.yml` file.
 
-**Root cause**
-- Healthchecks used `curl`, but `nginx:alpine` does not include curl by default, so the healthcheck command failed.
+**Root Cause**
+- The architecture lacked a way for Docker to verify if the Nginx containers were actually ready to serve traffic before routing requests to them.
 
 **Fix**
-- Install curl in both nginx-based images:
-  - `frontend/Dockerfile`: `RUN apk add --no-cache curl`
-  - `proxy/Dockerfile`: `RUN apk add --no-cache curl`
-- Use the working healthchecks:
-  - Frontend: `curl -f http://localhost/health`
-  - Proxy: `curl -f http://localhost/`
+- Added healthcheck blocks to both services in `docker-compose.yml`.
+- Used `curl` to verify the endpoints. Because the base image is `nginx:alpine` (which lacks `curl`), I added `RUN apk add --no-cache curl` to both `frontend/Dockerfile` and `proxy/Dockerfile`.
+- **Frontend Healthcheck:** `curl -f http://localhost/health`
+- **Proxy Healthcheck:** `curl -f http://localhost/`
 
-**How I verified**
-- After rebuild (`docker compose up --build -d`), both containers reported `healthy`.
+**Why I didn't use the API's `node -e` healthcheck method:**
+The API service uses a Node.js inline script (`node -e "require('http').get..."`) for its healthcheck. This works perfectly for the API because the API container has the full Node.js runtime installed. However, the `frontend` and `proxy` containers use lightweight `nginx:alpine` images, which do not have Node.js installed at runtime. Using `curl` is the native, lightweight standard for verifying HTTP status in Alpine web server containers.
 
+**How I Verified**
+- Ran `docker compose up --build -d`.
+- Waited 15 seconds, ran `docker compose ps`, and confirmed all four services (`api`, `db`, `frontend`, `proxy`) successfully reported a `(healthy)` status.
+  
 ---
 
 ### 7) Orders created but stock didn’t change
-**What I saw**
+**What I Saw**
 - Creating an order succeeded and appeared under `/api/orders` with status `pending`.
 - Item stock counts did not decrease after ordering.
 
-**Root cause**
+**Root Cause**
 - The order transaction inserted into `orders` + `order_items` but never updated `items.stock`.
 
-**Fix**
-- Inside the `POST /api/orders` transaction, decrement stock per item:
+**Fixed**
+- Inside the `POST /api/orders` transaction, decreased stock count per item:
   - `UPDATE items SET stock = stock - $1 WHERE id = $2`
 
-**How I verified**
-- After rebuild, placing an order decreased stock correctly in subsequent `/api/items` responses.
+**How I Verified**
+- After rebuild, placing an order using the UI decreased the stock correctly in subsequent `/api/items` responses.
 
 ---
 
 ## Part 2 — Goal 2: Redis caching (implemented)
-
-### Requirements
-- Connect API to Redis at `redis://cache:6379`
-- Cache `GET /api/items` with TTL (60 seconds)
-- Invalidate cache when an order is placed (stock changes)
-- Fail gracefully if Redis is unavailable
-
 ### Implementation summary
-1. **Single Redis client**
+1. **Single Redis Client**
 - Created a shared Redis client module (`api/src/redis.js`) and used `redisClient.isReady` to guard cache operations.
-- Attached an error handler so Redis disconnects don’t crash the API.
+- Attached an error handler so if Redis disconnects, it won’t crash the API.
 
 2. **Cache GET /api/items**
 - Key: `items:all`
@@ -149,15 +144,15 @@ This document lists the real issues found from a clean clone + fresh `docker com
 - On cache hit: return cached JSON.
 - On miss / Redis down: query Postgres and (if Redis ready) `SETEX` the response.
 
-3. **Invalidate on writes**
-- After successful order **COMMIT**:
+3. **Invalidate on Writes**
+- After a successful order **COMMIT**:
   - `DEL items:all`
 - Also invalidate on item mutations (`POST /api/items`, `PUT /api/items/:id`) if applicable.
 
 4. **Graceful fallback**
 - If Redis is stopped, API continues serving from Postgres (no 502/500 due to cache).
 
-### How I tested caching (proof, not guessing)
+### How I Tested Caching
 - Ran Redis monitor:
   - `docker compose exec cache redis-cli monitor`
 - Refreshed the UI / hit `/api/items` and observed:
@@ -169,12 +164,16 @@ This document lists the real issues found from a clean clone + fresh `docker com
 
 ## Bonus
 
-### A) Security improvements (realistic for this stack)
-- **Secrets handling:** credentials are currently inside `docker-compose.yml` (risk of accidental commits/leaks). Recommend moving to a local `.env` (gitignored) or Docker secrets for anything beyond take-home.
-- **Avoid logging secrets:** don’t print full `DATABASE_URL` / connection strings in logs.
-- **AuthZ/AuthN:** admin endpoints (`POST/PUT /api/items`) should be protected (even basic API key / JWT) if this were real.
+### A) Healthcheck Improvements
+- **1. Healthchecks:** kept them lightweight and deterministic; proxy health should check `/` routing , API health should check DB connectivity.
 
-### B) Correctness & resilience
-- **Prevent overselling:** update stock with a guard to prevent negative stock.
-- **Healthchecks:** keep them lightweight and deterministic; proxy health should check `/` routing (already done), API health should check DB connectivity (already done).
+### B) Security Improvements
+- **1. Secrets handling:** credentials are currently inside `docker-compose.yml` (risk of accidental commits/leaks). Recommend moving to a local `.env` (gitignored) or Docker secrets for anything beyond this project.
+- **2. Avoid logging secrets:** don’t print full `DATABASE_URL` / connection strings in logs.
 
+### C) Architecture Recommendations
+* **1. API Horizontal Scaling:** Because we successfully implemented Redis, the Express API is now completely stateless. We can easily scale the API by running multiple replicas in Docker Compose (`deploy: replicas: 3`). The Nginx upstream block will automatically act as a Round-Robin load balancer, distributing `/api/*` traffic across all available nodes to handle higher throughput.
+* **2. CDN Offloading:** For a real-world e-commerce site, serving the React Single Page Application from a Docker container is inefficient. The built frontend assets should be pushed to a global CDN (like AWS CloudFront or Vercel). The Nginx proxy would then be simplified to act solely as an API Gateway (handling rate-limiting and routing for the Express backend), drastically reducing server load.
+
+
+**Prevent overselling:** update stock with a guard to prevent negative stock.
